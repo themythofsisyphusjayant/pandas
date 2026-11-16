@@ -4329,6 +4329,11 @@ class MultiIndex(Index):
         # a bool indexer for the positions we want to take
         indexer: npt.NDArray[np.bool_] | None = None
 
+        # GH#54009 An empty list-like key matches nothing, but the remaining
+        #  levels must still be validated: a missing label to the right of an
+        #  empty key raises KeyError, just as it does to the left of one.
+        seen_empty = False
+
         for i, k in enumerate(seq):
             lvl_indexer: npt.NDArray[np.bool_] | slice | None = None
 
@@ -4492,12 +4497,15 @@ class MultiIndex(Index):
                             vec_indexer = vec_indexer | (level_codes == -1)
                         lvl_indexer = vec_indexer
                     # else: an empty key matches nothing; leaving lvl_indexer
-                    #  as None short-circuits to an empty indexer below
+                    #  as None is handled below
 
                 if lvl_indexer is None:
-                    # no matches we are done
+                    # GH#54009 an empty key matches nothing, but do not return
+                    #  yet: the remaining levels must still be validated, so
+                    #  treat the empty key as matching no rows and continue.
                     # test_loc_getitem_duplicates_multiindex_empty_indexer
-                    return np.array([], dtype=np.intp)
+                    lvl_indexer = np.zeros(n, dtype=np.bool_)
+                    seen_empty = True
 
             elif com.is_null_slice(k):
                 # empty slice
@@ -4522,7 +4530,10 @@ class MultiIndex(Index):
                 indexer = lvl_indexer
             else:
                 indexer &= lvl_indexer
-                if not np.any(indexer) and np.any(lvl_indexer):
+                # GH#54009 If an empty key was seen, the result is already
+                #  empty because of it, so a later level matching rows is
+                #  not a cross-level non-intersection; skip the raise.
+                if not seen_empty and not np.any(indexer) and np.any(lvl_indexer):
                     raise KeyError(seq)
 
         # empty indexer

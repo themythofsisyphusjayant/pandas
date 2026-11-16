@@ -506,6 +506,31 @@ def test_loc_getitem_duplicates_multiindex_empty_indexer(columns_indexer):
     tm.assert_frame_equal(result, expected)
 
 
+def test_loc_multiindex_empty_list_indexer_missing_key():
+    # GH#54009
+    df = pd.DataFrame(
+        {"a": [1, 1, 2, 3], "b": [1, 0, 2, 2], "d": [1, 0, 2, 2], "c": [1, 2, 3, 4]}
+    ).set_index(["a", "b", "d"])
+    # missing key to the right of an empty list raises, as it does to the left
+    with pytest.raises(KeyError, match=r"\[3\]"):
+        df.loc[([], [3]), :]
+    with pytest.raises(KeyError, match=r"\[3\]"):
+        df.loc[([1], [], [3]), :]
+    with pytest.raises(KeyError, match="3"):
+        df.loc[([], 3), :]
+    # all keys present: an empty list still returns an empty frame
+    result = df.loc[([], [1]), :]
+    assert result.shape == (0, 1)
+    result = df.loc[([], 1), :]
+    assert result.shape == (0, 1)
+
+    ser = df["c"]
+    with pytest.raises(KeyError, match=r"\[3\]"):
+        ser.loc[([], [3])]
+    result = ser.loc[([], [1])]
+    assert result.shape == (0,)
+
+
 def test_loc_getitem_duplicates_multiindex_non_scalar_type_object():
     # regression from < 0.14.0
     # GH 7914

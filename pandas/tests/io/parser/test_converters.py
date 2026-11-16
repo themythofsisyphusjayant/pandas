@@ -489,3 +489,59 @@ def test_converter_unhashable_collections(all_parsers, converter, values):
     result = parser.read_csv(StringIO(data), converters={"A": converter})
     expected = pd.DataFrame({"A": values})
     tm.assert_frame_equal(result, expected)
+
+
+def test_converter_error_includes_column_and_row(c_parser_only):
+    # GH#61700: a converter raising must say which column and row failed.
+    # The row number is the 1-based data-row number (the bad value is the
+    # 4th data row here).
+    parser = c_parser_only
+    data = "a\tb\tc\n1\ta\t1\n2\tb\t2\n3\tc\t3\n4\td\tasdf\n5\te\t5\n"
+    msg = (
+        "Error converting column 'c' at row 4: "
+        "invalid literal for int\\(\\) with base 10: 'asdf'"
+    )
+    with pytest.raises(ValueError, match=msg):
+        parser.read_csv(StringIO(data), sep="\t", converters={"c": int})
+
+
+def test_converter_error_preserves_exception_type(c_parser_only):
+    # GH#61700: the original exception type is preserved, only the message
+    # gains the column and row. The converter fails on the first data row.
+    parser = c_parser_only
+    data = "a\tb\tc\n1\ta\t1\n2\tb\t2\n"
+    msg = "Error converting column 'c' at row 1: "
+    with pytest.raises(TypeError, match=msg):
+        parser.read_csv(
+            StringIO(data), sep="\t", converters={"c": lambda x: int(x) + "x"}
+        )
+
+
+def test_converter_error_first_row_and_no_header(c_parser_only):
+    # GH#61700: bad value in the first data row is row 1; with header=None
+    # the column is labelled by its position.
+    parser = c_parser_only
+    data = "a\tb\tc\n1\ta\tasdf\n2\tb\t2\n"
+    msg = "Error converting column 'c' at row 1: "
+    with pytest.raises(ValueError, match=msg):
+        parser.read_csv(StringIO(data), sep="\t", converters={"c": int})
+
+    data_no_header = "1\ta\t1\n2\tb\tasdf\n"
+    msg = "Error converting column 2 at row 2: "
+    with pytest.raises(ValueError, match=msg):
+        parser.read_csv(
+            StringIO(data_no_header), sep="\t", header=None, converters={2: int}
+        )
+
+
+def test_converter_error_row_across_chunks(c_parser_only):
+    # GH#61700: the row number stays correct when the bad value is in a
+    # later chunk (4th data row, in the second chunk of 2).
+    parser = c_parser_only
+    data = "a\tb\tc\n1\ta\t1\n2\tb\t2\n3\tc\t3\n4\td\tasdf\n5\te\t5\n"
+    msg = "Error converting column 'c' at row 4: "
+    with pytest.raises(ValueError, match=msg):
+        chunks = parser.read_csv(
+            StringIO(data), sep="\t", converters={"c": int}, chunksize=2
+        )
+        list(chunks)

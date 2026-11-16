@@ -454,6 +454,11 @@ cdef class TextReader:
         # this and falls back to a serial read (GH#66259).
         public bint na_left_literal
         uint64_t parser_start  # this is modified after __init__
+        # Data rows converted by earlier _read_rows calls on this reader.
+        # _apply_converter reports the 1-based data-row number as
+        # rows_consumed + i + 1, which stays correct across chunks
+        # (parser_start is buffer-relative once rows are consumed).
+        uint64_t rows_consumed
         const char *encoding_errors
         object _encoding_errors
         kh_str_starts_t *false_set
@@ -698,6 +703,7 @@ cdef class TextReader:
 
         self.allow_leading_cols = allow_leading_cols
         self.leading_cols = 0  # updated in _get_header
+        self.rows_consumed = 0
 
         # TODO: no header vs. header is not the first row
         self.has_mi_columns = 0
@@ -1215,6 +1221,7 @@ cdef class TextReader:
             if trim:
                 parser_trim_buffers(self.parser)
             self.parser_start -= rows_read
+            self.rows_consumed += rows_read
 
         return columns
 
@@ -1330,7 +1337,7 @@ cdef class TextReader:
                                       f"be used.")
                 results[i] = _apply_converter(
                     conv, self.parser, i, start, end,
-                    self._get_na_pyset(i, name))
+                    self._get_na_pyset(i, name), name, self.rows_consumed)
                 continue
 
             # Collect the set of NaN values associated with the column.
@@ -4533,7 +4540,8 @@ for k in list(na_values):
 @cython.wraparound(False)
 @cython.boundscheck(False)
 cdef _apply_converter(object f, parser_t *parser, int64_t col,
-                      int64_t line_start, int64_t line_end, set na_set):
+                      int64_t line_start, int64_t line_end, set na_set,
+                      object name, uint64_t row_base):
     cdef:
         Py_ssize_t i, lines
         coliter_t it
@@ -4541,6 +4549,8 @@ cdef _apply_converter(object f, parser_t *parser, int64_t col,
         c_int64_t token_idx = 0
         ndarray[object] result
         object val
+        object err
+        object col_desc
 
     lines = line_end - line_start
     result = np.empty(lines, dtype=np.object_)
@@ -4552,7 +4562,26 @@ cdef _apply_converter(object f, parser_t *parser, int64_t col,
         # _token_len, not PyUnicode_FromString: a converter must see the same
         # value the object path produces, embedded NULs included.
         val = PyUnicode_DecodeUTF8(word, _token_len(parser, token_idx), NULL)
-        result[i] = f(val)
+        try:
+            result[i] = f(val)
+        except Exception as err:
+            # GH#61700: tell the user which column and row failed, then let
+            # the original exception bubble up unchanged in type. The row
+            # number is the 1-based data-row number (row_base counts the
+            # data rows converted by earlier _read_rows calls on this
+            # reader), so it stays correct across chunks; parser_start
+            # alone is buffer-relative once rows are consumed. name is
+            # None with header=None, in which case the positional column
+            # index labels the column.
+            if name is None:
+                col_desc = f"column {col}"
+            else:
+                col_desc = f"column {name!r}"
+            err.args = (
+                f"Error converting {col_desc} at row "
+                f"{row_base + i + 1}: {err}",
+            ) + err.args[1:]
+            raise
 
     if na_set:
         _sanitize_converted(result, na_set)
